@@ -1120,6 +1120,21 @@ pub struct NameServer {
   port: u16,
 }
 
+/// Parse a DNS query name the way c-ares does.
+///
+/// An empty hostname is the DNS root (`.`). Hickory's `Name::from_utf8("")`
+/// produces a relative empty name (`is_fqdn == false`), so the resolver would
+/// apply the system search list instead of querying the root. Node.js
+/// `dns.resolve("")` queries the root and reports `ENODATA` for record types
+/// the root does not have (A, AAAA, MX, …).
+fn parse_query_name(query: &str) -> Result<Name, NetError> {
+  if query.is_empty() {
+    return Ok(Name::root());
+  }
+  Name::from_utf8(query)
+    .map_err(|_| NetError::DnsInvalidName(query.to_string()))
+}
+
 #[op2(stack_trace)]
 pub async fn op_dns_resolve(
   state: Rc<RefCell<OpState>>,
@@ -1139,8 +1154,7 @@ pub async fn op_dns_resolve(
   // hickory reports the same way, so there would be no way to tell a malformed
   // name from a broken connection after the fact. Doing it here keeps the
   // `EBADNAME` classification in `NetError::ares_code` exact.
-  let name = Name::from_utf8(&query)
-    .map_err(|_| NetError::DnsInvalidName(query.clone()))?;
+  let name = parse_query_name(&query)?;
 
   let (config, mut opts) = if let Some(name_server) =
     options.as_ref().and_then(|o| o.name_server.as_ref())
@@ -1432,6 +1446,33 @@ mod tests {
   use socket2::SockRef;
 
   use super::*;
+
+  #[test]
+  fn parse_query_name_empty_is_root() {
+    let name = parse_query_name("").unwrap();
+    assert!(name.is_root());
+    assert!(name.is_fqdn());
+    assert_eq!(name, Name::root());
+    // Hickory treats "" as a relative empty name, which would make the
+    // resolver apply the system search list instead of querying the root.
+    let relative = Name::from_utf8("").unwrap();
+    assert!(!relative.is_fqdn());
+    assert_ne!(name, relative);
+  }
+
+  #[test]
+  fn parse_query_name_dot_is_root() {
+    let name = parse_query_name(".").unwrap();
+    assert!(name.is_root());
+    assert!(name.is_fqdn());
+  }
+
+  #[test]
+  fn parse_query_name_malformed_is_badname() {
+    let err = parse_query_name("example..com").unwrap_err();
+    assert!(matches!(err, NetError::DnsInvalidName(_)));
+    assert_eq!(err.ares_code(), "EBADNAME");
+  }
 
   #[test]
   fn rdata_to_return_record_a() {

@@ -94,6 +94,46 @@ Deno.test("[node/dns] resolve of a malformed hostname reports EBADNAME", async (
   assertEquals(err.hostname, "example..com");
 });
 
+// Regression test for https://github.com/denoland/deno/issues/36535
+// `dns.resolve("", …)` must query the DNS root the way Node.js/c-ares does
+// (`""` is not a relative name). The root has no A/AAAA records, so the
+// error is `ENODATA` with `syscall: "queryA"` / `"queryAaaa"` and
+// `errno: undefined` — not `ENOTFOUND` from applying the system search list.
+function assertEmptyHostResolveError(
+  err: ErrnoException,
+  syscall: string,
+) {
+  assert(err, "expected an error for an empty hostname");
+  assertEquals(err.code, "ENODATA");
+  assertEquals(err.errno, undefined);
+  assertEquals(err.syscall, syscall);
+  assertEquals(err.message, `${syscall} ENODATA`);
+  assertEquals(err.hostname, undefined);
+}
+
+Deno.test("[node/dns] resolve of an empty hostname reports ENODATA", async () => {
+  const aErr = await new Promise<ErrnoException>((resolve) => {
+    dns.resolve("", "A", (err) => {
+      resolve(err as unknown as ErrnoException);
+    });
+  });
+  assertEmptyHostResolveError(aErr, "queryA");
+
+  const aaaaErr = await new Promise<ErrnoException>((resolve) => {
+    dns.resolve("", "AAAA", (err) => {
+      resolve(err as unknown as ErrnoException);
+    });
+  });
+  assertEmptyHostResolveError(aaaaErr, "queryAaaa");
+
+  try {
+    await dnsPromises.resolve("", "A");
+    fail();
+  } catch (err) {
+    assertEmptyHostResolveError(err as ErrnoException, "queryA");
+  }
+});
+
 Deno.test("lookupService promise", async () => {
   // Named import
   const result = await lookupServicePromise(address, port);
